@@ -1,102 +1,79 @@
 # Encodeurs et auto-encodeurs : explorer leurs usages pour l'inférence
 
-> Projet d'apprentissage personnel : j'explore comment se servir d'un auto-encodeur
-> pour faire des prédictions, en comparant trois approches à des baselines supervisées sur un même
-> jeu de données tabulaire (Breast Cancer Wisconsin). Le tout accompagné d'expériences de
-> robustesse, d'efficacité en labels et d'ablation.
+> **En bref.** Projet d'apprentissage personnel : j'explore les différentes façons de se servir
+> d'un auto-encodeur pour l'inférence, comparées à des baselines supervisées, sur un même jeu de
+> données tabulaire (Breast Cancer Wisconsin) — avec des expériences de robustesse, d'efficacité
+> en labels, d'ablation, et une comparaison avec un auto-encodeur variationnel (VAE).
 
 **Notions abordées.** Encodeur / décodeur, auto-encodeur, espace latent et compression ;
 détection d'anomalies par erreur de reconstruction et choix de seuil (non supervisé vs calibré) ;
 apprentissage auto-supervisé (SSL), pré-entraînement, linear probing, full fine-tuning, effet de
 la dimension latente ; baselines supervisées (régression logistique, random forest), grid search
 et validation croisée ; métriques (ROC-AUC, PR-AUC, F1) ; reproductibilité (graines aléatoires),
-robustesse multi-graines, courbe d'efficacité en labels, et ablation du pré-entraînement.
+robustesse multi-graines, courbe d'efficacité en labels, ablation du pré-entraînement ;
+auto-encodeur variationnel (VAE), terme KL et espace latent régularisé.
 
-**Contenu du dépôt (4 notebooks).**
+**Résumé des étapes et des résultats.**
 
-1. `01` — détection d'anomalies avec un auto-encodeur (erreur de reconstruction + seuils)
-2. `02` — SSL : pré-entraînement, puis linear probing et full fine-tuning, + effet de la dimension latente
-3. `03` — baselines supervisées (régression logistique, random forest)
-4. `04` — expériences : stabilité multi-graines, efficacité en labels, ablation du pré-entraînement
+| Notebook | Ce que j'explore | Résultat clé (ROC-AUC test) |
+|---|---|---|
+| `01` | Détection d'anomalies : auto-encodeur entraîné sur les sains, erreur de reconstruction comme score, deux façons de fixer le seuil | ~0,96 **sans aucun label d'anomalie** |
+| `02` | SSL : pré-entraînement, puis linear probing (encodeur gelé) et full fine-tuning ; effet de la dimension latente | probing **0,986**, full-FT **0,997** ; agrandir le latent n'aide pas ici |
+| `03` | Baselines supervisées, réglées par grid search + validation croisée | régression logistique **0,993**, random forest **0,997** |
+| `04` | Expériences : stabilité multi-graines, efficacité en labels, ablation | résultats stables ; logreg > SSL à peu de labels ; pré-entraînement **0,988** vs encodeur aléatoire **0,686** |
+| `05` | VAE : espace latent régularisé (terme KL), comparé à l'AE classique | latent plus compact ; perf prédictive quasi identique à l'AE (~**0,99**) |
 
-**Résultats en un coup d'œil.** Les baselines supervisées et le SSL + full fine-tuning atteignent
-0,99+ de ROC-AUC ; le linear probing sur encodeur gelé suit de près (0,986) ; la détection
-d'anomalies non supervisée reste en dessous (~0,96) mais sans aucun label d'anomalie. Deux
-constats plus fins : augmenter la dimension latente n'aide pas sur ce dataset facile, et le
-pré-entraînement bat largement un encodeur aléatoire (0,988 vs 0,686) sans pour autant dépasser
-une simple régression logistique quand les données sont déjà faciles à séparer.
+**À retenir en une phrase :** une représentation apprise sans étiquette est déjà presque
+linéairement séparable (le probing frôle le supervisé), le full fine-tuning égale la meilleure
+baseline, mais sur un dataset aussi facile le pré-entraînement ne dépasse pas une simple
+régression logistique — son intérêt se verrait sur des données plus complexes.
 
 ---
 
-Ce dépôt est un compte rendu personnel. Je l'ai monté pour apprendre, en pratiquant, comment
-on se sert d'un encodeur une fois qu'il a appris à représenter des données — et surtout quelles
-sont les différentes manières de l'utiliser au moment de faire des prédictions. Ce n'est pas
-une contribution de recherche et ce n'est pas censé l'être : l'objectif est de manipuler ces
-idées moi-même, de les comparer proprement sur un même jeu de données, et de garder une trace
-claire de ce que chacune donne.
+## L'idée de départ
 
-L'idée de départ tient en une question. Un auto-encodeur apprend à compresser puis reconstruire
-des données sans avoir besoin d'étiquettes. Une fois cet apprentissage fait, qu'est-ce qu'on
-peut réellement en tirer pour prédire quelque chose ? J'ai exploré trois réponses, et je les ai
-systématiquement confrontées à une baseline supervisée classique pour garder les pieds sur
-terre.
+Un auto-encodeur apprend à compresser puis reconstruire des données sans étiquettes. Une fois
+cet apprentissage fait, qu'est-ce qu'on peut en tirer pour prédire ? J'ai exploré trois réponses
+et je les ai systématiquement comparées à une baseline supervisée. Ce n'est pas un projet de
+recherche : le but est de manipuler ces idées moi-même et de garder une trace claire de ce que
+chacune donne.
 
-## Le terrain d'expérience
+Le terrain est le jeu de données Breast Cancer Wisconsin (scikit-learn) : 569 patients, 30
+mesures numériques, étiquette binaire (tumeur maligne ou tissu bénin). Petit, propre et déjà
+bien séparable, il permet de comparer des méthodes sans se perdre dans le nettoyage. Détail
+utile : dans scikit-learn la classe 0 est la tumeur et la classe 1 le tissu sain ; pour la
+détection d'anomalies j'ai inversé cette convention pour raisonner en « normal » vs « anormal ».
 
-J'ai tout fait sur le jeu de données Breast Cancer Wisconsin (inclus dans scikit-learn) : 569
-patients, 30 mesures numériques chacun, et une étiquette binaire — tumeur maligne ou tissu
-bénin. Je l'ai choisi parce qu'il est petit, propre et déjà bien séparable : ça me permettait
-de comparer des méthodes sans passer mon temps sur le nettoyage, et de me concentrer sur ce que
-je voulais vraiment comprendre. Un détail qui a son importance : dans scikit-learn, la classe 0
-est la tumeur et la classe 1 le tissu sain. Pour la partie détection d'anomalies, j'ai inversé
-cette convention afin de raisonner en « normal » contre « anormal ».
+## 1. L'auto-encodeur pour détecter des anomalies
 
-## Ce que j'ai mis en place
+J'entraîne l'auto-encodeur uniquement sur des patients sains, à seule fin de bien les
+reconstruire. L'intuition : un modèle qui n'a vu que du « normal » reconstruit mal une tumeur
+qu'il n'a jamais rencontrée. L'erreur de reconstruction devient alors un score d'anomalie.
 
-### 1. L'auto-encodeur seul, pour détecter des anomalies
+Ça marche : sur le test, l'erreur moyenne vaut ~0,6 pour les sains contre plus de 7 pour les
+tumeurs, et le score seul (sans seuil) donne un ROC-AUC autour de 0,96. Le latent étant en
+dimension 2, on peut aussi visualiser la séparation des deux groupes.
 
-La première approche n'utilise aucune étiquette de tumeur. J'entraîne l'auto-encodeur
-uniquement sur des patients sains, à seule fin de bien les reconstruire. L'intuition : un modèle
-qui n'a jamais vu que du « normal » devrait reconstruire fidèlement un profil sain, mais se
-tromper davantage sur une tumeur qu'il n'a jamais rencontrée. L'erreur de reconstruction
-devient alors un score d'anomalie.
+Pour passer du score à une décision, je compare deux seuils : un seuil non supervisé (95e
+percentile des erreurs sur les sains, soit ~5 % de fausses alertes tolérées) et un seuil calibré
+sur une petite validation (maximisation du F1). Le seuil calibré fait un peu mieux (F1 ~0,90 vs
+~0,88), ce qui est logique puisqu'il utilise un peu d'information supervisée.
 
-Concrètement, ça marche : sur le jeu de test, l'erreur moyenne de reconstruction est d'environ
-0,6 pour les patients sains contre plus de 7 pour les tumeurs — un écart très net. En regardant
-uniquement ce score, sans jamais fixer de seuil, on obtient un ROC-AUC autour de 0,96. Comme la
-dimension de l'espace latent est réduite à 2, j'ai aussi pu visualiser cet espace : les sains et
-les tumeurs s'y séparent visiblement.
+## 2. L'auto-encodeur comme pré-entraînement, puis fine-tuning
 
-Reste à transformer ce score continu en décision. J'ai comparé deux façons de choisir le seuil,
-qui correspondent à deux situations réelles. La première est entièrement non supervisée : je
-prends le 95e percentile des erreurs observées sur les patients sains, ce qui revient à tolérer
-environ 5 % de fausses alertes. La seconde suppose qu'on dispose de quelques exemples étiquetés
-et cherche le seuil qui maximise le F1 sur une petite validation. Le seuil calibré fait un peu
-mieux (F1 autour de 0,90 contre 0,88 pour le seuil non supervisé), ce qui est logique puisqu'il
-s'appuie sur un peu d'information supervisée.
+Ici l'auto-encodeur sert de pré-entraînement auto-supervisé : l'encodeur apprend une
+représentation en reconstruisant les données sans étiquettes, puis je le réutilise pour classer,
+de deux façons. En *linear probing*, je gèle l'encodeur et n'entraîne qu'une petite tête
+(quelques dizaines de paramètres) : ça mesure la qualité brute de la représentation. En *full
+fine-tuning*, je repars des mêmes poids mais laisse tout le réseau s'adapter.
 
-### 2. L'auto-encodeur comme pré-entraînement, puis fine-tuning
+Le probing atteint déjà 0,986 de ROC-AUC avec l'encodeur figé : la représentation apprise sans
+labels est donc presque linéairement séparable. Le full fine-tuning monte à 0,997 (F1 0,981) en
+spécialisant tout le réseau pour la tâche, au prix d'un entraînement complet plutôt que d'une
+poignée de paramètres.
 
-La deuxième approche change complètement d'usage. Ici l'auto-encodeur ne sert pas à prédire
-directement : il sert de pré-entraînement auto-supervisé. L'encodeur apprend d'abord une
-représentation en reconstruisant les données, sans étiquettes, puis je réutilise cet encodeur
-pour une tâche de classification. J'ai testé les deux façons classiques de faire ça.
-
-En *linear probing*, je gèle complètement l'encodeur et je n'entraîne qu'une petite tête de
-classification par-dessus — quelques dizaines de paramètres seulement. Ça mesure la qualité
-brute de la représentation apprise sans labels. En *full fine-tuning*, je repars des mêmes
-poids pré-entraînés mais je laisse tout le réseau s'adapter à la tâche.
-
-Le résultat qui m'a le plus marqué vient du linear probing : avec l'encodeur totalement figé, une
-simple tête atteint déjà 0,986 de ROC-AUC. Autrement dit, la représentation apprise sans la
-moindre étiquette est déjà presque linéairement séparable. Le full fine-tuning va plus loin et
-atteint 0,997 de ROC-AUC avec un F1 de 0,981 : en dégelant tout le réseau, on le spécialise
-pour la classification au lieu de se contenter de ce qu'il avait appris en reconstruisant. Le
-prix à payer, c'est qu'on ré-entraîne l'ensemble du réseau plutôt qu'une poignée de paramètres.
-
-J'ai ensuite regardé l'effet de la taille de l'espace latent, en refaisant tout le pipeline
-pour des dimensions de 2, 4, 8, 16 et 32. Mon attente naïve était qu'un espace plus grand
-donnerait de meilleures performances. Ce n'est pas ce que j'ai observé.
+J'ai ensuite fait varier la dimension latente (2, 4, 8, 16, 32), en m'attendant à ce qu'un
+espace plus grand aide. Ce n'est pas le cas.
 
 | dimension latente | probing ROC-AUC | probing F1 | full-FT ROC-AUC | full-FT F1 |
 |---:|---:|---:|---:|---:|
@@ -108,29 +85,22 @@ donnerait de meilleures performances. Ce n'est pas ce que j'ai observé.
 
 ![ROC-AUC selon la dimension latente](figures/latent_dim_sweep.png)
 
-Tout reste sur un plateau autour de 0,98–0,99, et les petites variations d'une dimension à
-l'autre ressemblent davantage à du bruit d'entraînement qu'à une vraie tendance. L'explication
-que j'en tire : dès la dimension 2, la représentation est si proche du plafond que la marge de
-progression est quasi nulle. Sur un jeu de données facile, où les classes sont largement
-séparables même dans un espace très compressé, la dimension latente n'est tout simplement pas
-le levier qui compte.
+Tout reste sur un plateau autour de 0,98–0,99 ; les variations ressemblent à du bruit. Dès la
+dimension 2, la représentation est déjà proche du plafond : sur un dataset facile, la dimension
+latente n'est pas le levier qui compte.
 
-### 3. La baseline supervisée
+## 3. Les baselines supervisées
 
-Pour situer honnêtement les deux approches précédentes, il me fallait un point de comparaison
-solide : des modèles supervisés classiques, entraînés directement sur les étiquettes. J'ai pris
-une régression logistique et une random forest, toutes deux réglées par recherche
-d'hyperparamètres en validation croisée. Sur ce type de données tabulaires, ce sont des modèles
-difficiles à battre, et ça s'est confirmé : la random forest atteint 0,997 de ROC-AUC, la
-régression logistique 0,993.
+Pour situer honnêtement les approches précédentes, je prends deux modèles supervisés classiques,
+réglés par grid search en validation croisée : une régression logistique (0,993 de ROC-AUC) et
+une random forest (0,997). Sur des données tabulaires comme celles-ci, ils sont durs à battre.
 
 ![Courbes ROC des baselines supervisées](figures/baselines_roc.png)
 
-## Les résultats côte à côte
+## Résultats côte à côte
 
-Toutes les valeurs sont mesurées sur le jeu de test (20 % des données, mis de côté avant tout
-entraînement). Le ROC-AUC est ma métrique principale parce qu'il ne dépend pas du choix d'un
-seuil.
+Valeurs sur le jeu de test (20 % des données, mis de côté avant tout entraînement). Le ROC-AUC
+est ma métrique principale car il ne dépend pas du seuil.
 
 | Approche | ROC-AUC | F1 (macro) |
 |---|---:|---:|
@@ -140,28 +110,20 @@ seuil.
 | SSL + linear probing | 0.986 | 0.953 |
 | Auto-encodeur (détection d'anomalie) | ~0.96 | ~0.90 |
 
-La lecture d'ensemble est cohérente avec l'information dont dispose chaque méthode. Les
-baselines supervisées, qui voient tous les labels, restent la référence. Le pré-entraînement
-suivi d'un fine-tuning les rejoint complètement, ce qui montre qu'une bonne partie du travail
-peut se faire sans étiquettes. La détection d'anomalies reste en dessous, mais dans le bon ordre
-de grandeur — et c'est la seule méthode qui n'a eu besoin d'aucun exemple de tumeur pour
-fonctionner. Chaque approche paie, en somme, le prix de l'information dont elle se prive.
+Chaque méthode se classe selon l'information dont elle dispose : les baselines supervisées voient
+tous les labels et restent la référence, le SSL + fine-tuning les rejoint, et la détection
+d'anomalies reste en dessous mais sans avoir vu un seul exemple de tumeur.
 
 ## Expériences complémentaires
 
-Une fois les trois approches en place, j'ai voulu aller un cran plus loin que « ça marche » et
-tester quelques hypothèses. C'est l'objet d'un quatrième notebook, et c'est aussi la partie où
-j'ai le plus appris — notamment parce que les résultats ne sont pas ceux que j'attendais.
+Un quatrième notebook va au-delà du « ça marche » et teste trois hypothèses. C'est la partie où
+j'ai le plus appris, notamment parce que les résultats surprennent.
 
-D'abord la **stabilité** : en rejouant tout le pipeline sur cinq graines aléatoires, les scores
-bougent très peu (linear probing à 0.988 ± 0.008 de ROC-AUC, full fine-tuning à 0.995 ± 0.008).
-Les écarts que je mesurais sur un seul run ne sont donc pas des coups de chance, et le full
-fine-tuning garde son léger avantage de manière régulière.
+**Stabilité.** Sur cinq graines aléatoires, les scores bougent très peu (probing 0,988 ± 0,008,
+full-FT 0,995 ± 0,008) : les écarts observés ne sont pas des coups de chance.
 
-Ensuite l'**efficacité en labels**, le résultat le plus instructif. L'argument habituel en
-faveur du pré-entraînement est qu'il aide surtout quand les étiquettes sont rares. Je l'ai testé
-en n'entraînant le classifieur que sur une fraction des labels, et en comparant le SSL + linear
-probing à une simple régression logistique sur les mêmes données.
+**Efficacité en labels.** J'entraîne le classifieur sur une fraction seulement des labels, et je
+compare le SSL + probing à une régression logistique sur les mêmes données.
 
 | part des labels | SSL + probing (ROC-AUC) | régression logistique (ROC-AUC) |
 |---:|---:|---:|
@@ -173,33 +135,44 @@ probing à une simple régression logistique sur les mêmes données.
 
 ![Efficacité en labels : SSL vs régression logistique](figures/label_efficiency.png)
 
-C'est l'inverse de ce que j'attendais : ici la régression logistique domine, et l'écart est le
-plus grand justement quand il y a peu de labels (0.987 dès 5 % des étiquettes, contre 0.886 pour
-le probing). J'y vois deux raisons. Les données sont déjà quasi linéairement séparables dans
-l'espace des 30 variables brutes, donc un modèle linéaire simple suffit largement, même avec peu
-d'exemples. Et l'encodeur compresse en seulement 2 dimensions, ce qui jette beaucoup
-d'information avant même que le classifieur n'entre en jeu. Sur un dataset aussi facile, le
-pré-entraînement ne donne donc pas l'avantage qu'on lui prête d'habitude — cet avantage se
-verrait plutôt sur des données où les variables brutes ne suffisent pas.
+Contre toute attente, la régression logistique domine, surtout à peu de labels (0,987 dès 5 %
+contre 0,886 pour le probing). Deux raisons : les 30 variables brutes sont déjà quasi
+linéairement séparables, et l'encodeur compresse à 2 dimensions, ce qui jette de l'information.
+Sur un dataset aussi facile, le pré-entraînement n'apporte pas l'avantage attendu en faible
+régime de labels — cet avantage se verrait sur des données où les variables brutes ne suffisent
+pas.
 
-Enfin, une question toute bête mais importante : **est-ce que le pré-entraînement sert
-vraiment ?** Pour le savoir, j'ai comparé le linear probing sur mon encodeur pré-entraîné à
-exactement le même probing sur un encodeur aux poids aléatoires, jamais entraîné. La réponse est
-sans ambiguïté : on passe de 0.988 de ROC-AUC à 0.686 (et très instable, ± 0.20). Donc à
-l'intérieur de l'approche « encodeur gelé + tête », le pré-entraînement apporte énormément — il
-ne suffit simplement pas, sur ce cas facile, à battre une bonne baseline supervisée.
+**Le pré-entraînement sert-il vraiment ?** Oui : le même probing sur un encodeur aux poids
+aléatoires chute à 0,686 (et devient très instable, ± 0,20) contre 0,988 pour l'encodeur
+pré-entraîné. Le pré-entraînement apporte donc énormément par rapport à « rien » — il ne suffit
+juste pas à battre une bonne baseline supervisée sur ce cas facile.
 
-La leçon que je retiens de ces trois études, c'est que le pré-entraînement auto-supervisé est
-bien réel et utile, mais que son intérêt pratique dépend fortement du problème. Sur un jeu de
-données petit et facile, une baseline supervisée classique reste le choix le plus efficace ;
-l'intérêt du SSL apparaîtrait sur des données plus complexes ou moins directement exploitables.
-C'est typiquement le genre de nuance que je ne pouvais pas deviner sans faire l'expérience
-moi-même.
+## Un auto-encodeur variationnel (VAE) pour finir
 
-## Limites
-Les limites sont claires et font partie de l'exercice. Le jeu de données est petit et facile,
-donc les écarts entre méthodes sont faibles et je me garde de trop généraliser. Les
-architectures sont volontairement simples. Les prolongements qui m'intéressent seraient de
-reprendre ces mêmes approches sur des données plus difficiles et déséquilibrées — là où la
-détection d'anomalies prend tout son sens — et d'ajouter un auto-encodeur variationnel pour
-comparer un espace latent régularisé à celui obtenu ici.
+Dernier essai : remplacer l'auto-encodeur par un VAE, qui ajoute à la reconstruction un terme
+KL poussant l'espace latent vers une gaussienne centrée réduite. Je voulais surtout voir la
+différence de *construction* de l'espace latent, et vérifier si cette régularisation change la
+performance.
+
+![Espace latent : AE vs VAE](figures/latent_ae_vs_vae.png)
+
+Côté espace latent, la différence est visible : le nuage du VAE est plus compact et centré
+autour de l'origine, là où celui de l'AE classique s'étale librement. Le VAE « range » son
+espace, c'est exactement l'effet du terme KL. Côté performance prédictive, en revanche, les deux
+se tiennent de très près : linear probing à 0,990 de ROC-AUC pour le VAE contre 0,989 pour l'AE,
+et full fine-tuning à 0,999 contre 0,997. Autrement dit, la régularisation du VAE donne un espace
+plus propre sans rien coûter (ni rien apporter) à la classification sur ce dataset. Son vrai
+intérêt est ailleurs — un latent structuré, la génération — plus que dans la prédiction pure.
+
+## Ce que je retiens
+
+Une représentation apprise sans étiquette peut être étonnamment bonne, le full fine-tuning
+égale le meilleur modèle supervisé, et garder une baseline sous la main est indispensable pour
+juger de la qualité réelle. J'ai aussi vu, en le testant, que sur un problème facile augmenter
+la capacité (dimension latente) ou pré-entraîner n'apporte pas toujours ce qu'on croit :
+l'intérêt du SSL apparaît sur des données plus complexes, pas sur un cas aussi simple.
+
+Les limites font partie de l'exercice : dataset petit et facile, architectures volontairement
+simples, écarts faibles entre méthodes. Le prolongement qui m'intéresse le plus serait de
+reprendre toutes ces approches sur des données plus difficiles et déséquilibrées, là où la
+détection d'anomalies comme le pré-entraînement prendraient bien plus de sens.
